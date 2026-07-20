@@ -69,6 +69,33 @@ def save_device_config(ip, port):
         json.dump({'ip': ip, 'port': port}, f)
 
 
+def open_device_connection():
+    """Open a connection to the configured primary device.
+
+    Facial-identification terminals (and most office networks) block ICMP
+    ping, and some ZKTeco models only answer on UDP, so we skip pyzk's ping
+    precheck (which otherwise fails with a misleading timeout) and fall back
+    from TCP to UDP automatically. Returns a live connection object.
+    """
+    if not device_ip:
+        raise Exception("No primary device configured")
+
+    last_err = None
+    for force_udp in (False, True):  # try TCP first, then UDP
+        try:
+            zk = ZK(
+                device_ip,
+                port=int(device_port),
+                timeout=REQUEST_TIMEOUT,
+                ommit_ping=True,
+                force_udp=force_udp,
+            )
+            return zk.connect()
+        except Exception as e:
+            last_err = e
+    raise last_err
+
+
 # Global variables
 member_list = []
 classification_list = []
@@ -939,8 +966,7 @@ class Dashboard(ttk.Frame):
     
     def live_scan_thread(self):
         try:
-            zk = ZK(device_ip, port=int(device_port), timeout=REQUEST_TIMEOUT)
-            self.zk_conn = zk.connect()
+            self.zk_conn = open_device_connection()
             
             self.log_message(f"Connected to device at {device_ip}:{device_port}")
             self.live_status.config(text=f"Status: Scanning on {device_ip}", foreground='#28a745')
@@ -1006,8 +1032,7 @@ class Dashboard(ttk.Frame):
     def check_connection(self):
         def check():
             try:
-                zk = ZK(device_ip, port=int(device_port), timeout=REQUEST_TIMEOUT)
-                conn = zk.connect()
+                conn = open_device_connection()
                 conn.disconnect()
                 self.controller.message_queue.put(('messagebox', 'showinfo', {'title': 'Success', 'message': 'Connection successful!'}))
             except Exception as e:
@@ -1018,8 +1043,7 @@ class Dashboard(ttk.Frame):
     def pull_data(self):
         def pull():
             try:
-                zk = ZK(device_ip, port=int(device_port), timeout=REQUEST_TIMEOUT)
-                conn = zk.connect()
+                conn = open_device_connection()
                 all_data = conn.get_attendance()
                 
                 if not all_data:
@@ -1069,8 +1093,7 @@ class Dashboard(ttk.Frame):
         if messagebox.askyesno("Confirm", "Are you sure you want to restart the device?"):
             def restart():
                 try:
-                    zk = ZK(device_ip, port=int(device_port), timeout=REQUEST_TIMEOUT)
-                    conn = zk.connect()
+                    conn = open_device_connection()
                     conn.restart()
                     self.controller.message_queue.put(('messagebox', 'showinfo', {'title': 'Success', 'message': 'Device is restarting'}))
                 except Exception as e:
@@ -1082,8 +1105,7 @@ class Dashboard(ttk.Frame):
         if messagebox.askyesno("Confirm", "Are you sure you want to power off the device?"):
             def poweroff():
                 try:
-                    zk = ZK(device_ip, port=int(device_port), timeout=REQUEST_TIMEOUT)
-                    conn = zk.connect()
+                    conn = open_device_connection()
                     conn.poweroff()
                     self.controller.message_queue.put(('messagebox', 'showinfo', {'title': 'Success', 'message': 'Device is powering off'}))
                 except Exception as e:
@@ -1095,8 +1117,7 @@ class Dashboard(ttk.Frame):
         def check():
             try:
                 global member_list
-                zk = ZK(device_ip, port=int(device_port), timeout=REQUEST_TIMEOUT)
-                conn = zk.connect()
+                conn = open_device_connection()
                 all_users = conn.get_users()
                 
                 device_user_ids = [user.uid for user in all_users]
