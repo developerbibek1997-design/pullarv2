@@ -1,0 +1,50 @@
+name: Build Windows EXE (SDK edition)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'pullar lite/main_sdk.py'
+      - '.github/workflows/build-windows-sdk.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: 'pullar lite'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python (32-bit — required for zkemkeeper.dll)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: 'x86'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller==6.12.0 pywin32==306 requests==2.32.3 pillow==11.1.0
+
+      - name: Build onefile EXE (32-bit)
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name PullerSDK --icon icon.ico
+          --add-data "images;images"
+          --hidden-import win32com
+          --hidden-import win32com.client
+          --hidden-import pythoncom
+          --hidden-import pywintypes
+          --hidden-import win32timezone
+          main_sdk.py
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PullerSDK-windows-exe
+          path: 'pullar lite/dist/PullerSDK.exe'
+          if-no-files-found: error
