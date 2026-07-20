@@ -144,26 +144,50 @@ class ZKDevice:
             return "?"
 
     # -- attendance -------------------------------------------------------
+    @staticmethod
+    def _fmt(y, mo, d, h, mi, s):
+        return (f"{int(y):04d}-{int(mo):02d}-{int(d):02d} "
+                f"{int(h):02d}:{int(mi):02d}:{int(s):02d}")
+
     def get_attendance(self):
-        """Return a list of (enroll_id:str, 'YYYY-MM-DD HH:MM:SS') tuples."""
+        """Return a list of (enroll_id:str, 'YYYY-MM-DD HH:MM:SS') tuples.
+
+        Different SDK/firmware versions expose the log reader slightly
+        differently, so we try SSR_GetGeneralLogData first (has seconds) and
+        fall back to the legacy GetGeneralLogData.
+        """
         zk = self.zk
-        records = []
         zk.EnableDevice(self.MACHINE, False)
         try:
+            # Strategy A: SSR_GetGeneralLogData -> (ret, enroll, verify, inout,
+            #             year, month, day, hour, minute, second, workcode)
+            try:
+                if zk.ReadGeneralLogData(self.MACHINE):
+                    records = []
+                    while True:
+                        d = zk.SSR_GetGeneralLogData(self.MACHINE)
+                        if not isinstance(d, (tuple, list)) or not d[0]:
+                            break
+                        records.append((str(d[1]),
+                                        self._fmt(d[4], d[5], d[6], d[7], d[8], d[9])))
+                    if records:
+                        return records
+            except Exception:
+                pass
+
+            # Strategy B: legacy GetGeneralLogData -> (ret, TMachine, enroll,
+            #             EMachine, verify, inout, year, month, day, hour, minute)
+            records = []
             if zk.ReadGeneralLogData(self.MACHINE):
                 while True:
-                    data = zk.SSR_GetGeneralLogData(self.MACHINE)
-                    if not data or not data[0]:
+                    d = zk.GetGeneralLogData(self.MACHINE)
+                    if not isinstance(d, (tuple, list)) or not d[0]:
                         break
-                    # (ret, enroll, verify, inout, Y, M, D, h, m, s, workcode)
-                    enroll = str(data[1])
-                    y, mo, d, h, mi, s = (int(data[4]), int(data[5]), int(data[6]),
-                                          int(data[7]), int(data[8]), int(data[9]))
-                    ts = f"{y:04d}-{mo:02d}-{d:02d} {h:02d}:{mi:02d}:{s:02d}"
-                    records.append((enroll, ts))
+                    records.append((str(d[2]),
+                                    self._fmt(d[6], d[7], d[8], d[9], d[10], 0)))
+            return records
         finally:
             zk.EnableDevice(self.MACHINE, True)
-        return records
 
     def clear_attendance(self):
         try:
@@ -702,27 +726,43 @@ class Dashboard(ttk.Frame):
             try:
                 dev.connect()
                 records = dev.get_attendance()
-                if not records:
-                    self._msg('showinfo', 'Info', 'No attendance records found')
+                total = len(records)
+                if total == 0:
+                    self._msg('showinfo', 'Info',
+                              'No attendance records were read from the device.')
                     return
-                total, success = len(records), 0
+
                 by_devid = {}
                 for m in member_list:
                     by_devid.setdefault(str(m.get('device_id')), m)
+
+                matched, uploaded = 0, 0
                 for enroll, ts in records:
                     m = by_devid.get(str(enroll))
                     if not m:
                         continue
+                    matched += 1
                     try:
                         r = requests.post(f"{API_BASE}/createAttendance",
                                           data={'scanned_time': ts, 'mem': m['id'], 'org': m['org']},
                                           timeout=REQUEST_TIMEOUT)
                         if r.status_code == 200:
-                            success += 1
+                            uploaded += 1
                     except Exception:
                         pass
-                dev.clear_attendance()
-                self._msg('showinfo', 'Success', f"Pulled {success} of {total} records successfully")
+
+                # Only clear the device logs if everything uploaded, so no
+                # attendance is lost when something goes wrong.
+                cleared = uploaded == total and total > 0
+                if cleared:
+                    dev.clear_attendance()
+
+                self._msg('showinfo', 'Pull Attendance', (
+                    f"Records read from device: {total}\n"
+                    f"Matched to a member (device ID): {matched}\n"
+                    f"Uploaded to server: {uploaded}\n\n"
+                    + ("Device logs were cleared." if cleared else
+                       "Device logs were KEPT (not everything uploaded).")))
             except Exception as e:
                 self._msg('showerror', 'Error', f"Failed to pull data: {e}")
             finally:
