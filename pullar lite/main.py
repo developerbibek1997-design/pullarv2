@@ -104,32 +104,25 @@ def open_device_connection():
     if not device_ip:
         raise Exception("No primary device configured")
 
-    # Try the configured port first, then the standard ZKTeco SDK port 4370,
-    # in case the configured port belongs to a different service on the device.
-    ports = []
-    for p in (int(device_port or 0), 4370):
-        if p and p not in ports:
-            ports.append(p)
-
+    # Port comes from the Mero Attendance server config — use it as-is.
     last_err = None
-    for port in ports:
-        for force_udp in (False, True):  # try TCP first, then UDP
-            orig_socket = socket.socket
-            socket.socket = _UdpResetSafeSocket  # affects pyzk's socket creation
-            try:
-                zk = ZK(
-                    device_ip,
-                    port=port,
-                    timeout=REQUEST_TIMEOUT,
-                    password=int(device_password or 0),
-                    ommit_ping=True,
-                    force_udp=force_udp,
-                )
-                return zk.connect()
-            except Exception as e:
-                last_err = e
-            finally:
-                socket.socket = orig_socket  # always restore the real socket
+    for force_udp in (False, True):  # try TCP first, then UDP
+        orig_socket = socket.socket
+        socket.socket = _UdpResetSafeSocket  # affects pyzk's socket creation
+        try:
+            zk = ZK(
+                device_ip,
+                port=int(device_port),
+                timeout=REQUEST_TIMEOUT,
+                password=int(device_password or 0),
+                ommit_ping=True,
+                force_udp=force_udp,
+            )
+            return zk.connect()
+        except Exception as e:
+            last_err = e
+        finally:
+            socket.socket = orig_socket  # always restore the real socket
     raise last_err
 
 
