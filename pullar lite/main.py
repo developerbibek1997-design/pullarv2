@@ -58,15 +58,15 @@ def load_device_config():
     try:
         with open(CONFIG_PATH, 'r') as f:
             cfg = json.load(f)
-            return cfg.get('ip', ''), cfg.get('port', 0)
+            return cfg.get('ip', ''), cfg.get('port', 0), cfg.get('password', 0)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return '', 0
+        return '', 0, 0
 
 
-def save_device_config(ip, port):
+def save_device_config(ip, port, password=0):
     """Persist the primary-device config to the user data dir."""
     with open(CONFIG_PATH, 'w') as f:
-        json.dump({'ip': ip, 'port': port}, f)
+        json.dump({'ip': ip, 'port': port, 'password': password}, f)
 
 
 def open_device_connection():
@@ -75,7 +75,9 @@ def open_device_connection():
     Facial-identification terminals (and most office networks) block ICMP
     ping, and some ZKTeco models only answer on UDP, so we skip pyzk's ping
     precheck (which otherwise fails with a misleading timeout) and fall back
-    from TCP to UDP automatically. Returns a live connection object.
+    from TCP to UDP automatically. The Comm Key (device password) is passed
+    through — a mismatch is what causes WinError 10054 (connection reset).
+    Returns a live connection object.
     """
     if not device_ip:
         raise Exception("No primary device configured")
@@ -87,6 +89,7 @@ def open_device_connection():
                 device_ip,
                 port=int(device_port),
                 timeout=REQUEST_TIMEOUT,
+                password=int(device_password or 0),
                 ommit_ping=True,
                 force_udp=force_udp,
             )
@@ -103,7 +106,7 @@ organization = ""
 device_list = []
 org_id = 0
 new_member = 0
-device_ip, device_port = load_device_config()
+device_ip, device_port, device_password = load_device_config()
 
 class PullerApp(tk.Tk):
     def __init__(self):
@@ -642,6 +645,11 @@ class Dashboard(ttk.Frame):
         self.dev_port_entry.insert(0, '4370')
         self.dev_port_entry.pack(side='left', padx=(0, 10))
 
+        ttk.Label(add_frame, text="Comm Key:").pack(side='left', padx=(0, 4))
+        self.dev_pw_entry = ttk.Entry(add_frame, width=8)
+        self.dev_pw_entry.insert(0, str(device_password or 0))
+        self.dev_pw_entry.pack(side='left', padx=(0, 10))
+
         ttk.Button(
             add_frame,
             text="Add Device",
@@ -881,8 +889,13 @@ class Dashboard(ttk.Frame):
         except ValueError:
             messagebox.showwarning("Warning", "Port must be a number")
             return
+        try:
+            password = int(self.dev_pw_entry.get().strip() or 0)
+        except ValueError:
+            messagebox.showwarning("Warning", "Comm Key must be a number")
+            return
 
-        global device_list, device_ip, device_port
+        global device_list, device_ip, device_port, device_password
         # Avoid duplicates on the same IP
         device_list = [d for d in device_list if d.get('ip_address') != ip]
         device_list.append({
@@ -893,9 +906,10 @@ class Dashboard(ttk.Frame):
         })
 
         # Persist as the primary device so it works standalone
-        save_device_config(ip, port)
+        save_device_config(ip, port, password)
         device_ip = ip
         device_port = port
+        device_password = password
 
         self.dev_name_entry.delete(0, 'end')
         self.dev_ip_entry.delete(0, 'end')
@@ -911,14 +925,19 @@ class Dashboard(ttk.Frame):
         item = self.device_tree.item(selected[0])
         ip = item['values'][1]
         port = item['values'][2]
-        
-        # Save to persistent config (no shipped device.json needed)
-        save_device_config(ip, port)
 
-        global device_ip, device_port
+        global device_ip, device_port, device_password
+        # Keep any Comm Key already entered for the manual form
+        try:
+            device_password = int(self.dev_pw_entry.get().strip() or 0)
+        except (ValueError, AttributeError):
+            device_password = device_password or 0
+
+        # Save to persistent config (no shipped device.json needed)
+        save_device_config(ip, port, device_password)
         device_ip = ip
         device_port = port
-        
+
         messagebox.showinfo("Success", f"Primary device set to {ip}:{port}")
         self.update_dashboard_data()
     
