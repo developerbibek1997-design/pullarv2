@@ -11,6 +11,7 @@ from PIL import Image, ImageTk
 import os
 import queue
 import platform
+import socket
 import sys
 
 
@@ -69,6 +70,26 @@ def save_device_config(ip, port, password=0):
         json.dump({'ip': ip, 'port': port, 'password': password}, f)
 
 
+class _UdpResetSafeSocket(socket.socket):
+    """UDP-aware socket that disables Windows' spurious connection reset.
+
+    On Windows a UDP socket raises WinError 10054 ("connection forcibly
+    closed") after it receives an ICMP port-unreachable, even though UDP is
+    connectionless. pyzk doesn't guard against this, so ZKTeco devices that
+    answer over UDP fail. Disabling SIO_UDP_CONNRESET makes the socket ignore
+    those bogus resets. No effect on TCP sockets or on non-Windows systems.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if platform.system() == 'Windows' and hasattr(socket, 'SIO_UDP_CONNRESET'):
+            try:
+                if self.type == socket.SOCK_DGRAM:
+                    self.ioctl(socket.SIO_UDP_CONNRESET, False)
+            except OSError:
+                pass
+
+
 def open_device_connection():
     """Open a connection to the configured primary device.
 
@@ -76,14 +97,17 @@ def open_device_connection():
     ping, and some ZKTeco models only answer on UDP, so we skip pyzk's ping
     precheck (which otherwise fails with a misleading timeout) and fall back
     from TCP to UDP automatically. The Comm Key (device password) is passed
-    through — a mismatch is what causes WinError 10054 (connection reset).
-    Returns a live connection object.
+    through — a mismatch is one cause of WinError 10054 (connection reset).
+    We also patch pyzk's socket during connect to survive Windows' bogus UDP
+    resets. Returns a live connection object.
     """
     if not device_ip:
         raise Exception("No primary device configured")
 
     last_err = None
     for force_udp in (False, True):  # try TCP first, then UDP
+        orig_socket = socket.socket
+        socket.socket = _UdpResetSafeSocket  # affects pyzk's socket creation
         try:
             zk = ZK(
                 device_ip,
@@ -96,6 +120,8 @@ def open_device_connection():
             return zk.connect()
         except Exception as e:
             last_err = e
+        finally:
+            socket.socket = orig_socket  # always restore the real socket
     raise last_err
 
 
@@ -1055,9 +1081,35 @@ class Dashboard(ttk.Frame):
                 conn.disconnect()
                 self.controller.message_queue.put(('messagebox', 'showinfo', {'title': 'Success', 'message': 'Connection successful!'}))
             except Exception as e:
-                self.controller.message_queue.put(('messagebox', 'showerror', {'title': 'Error', 'message': f"Connection failed: {str(e)}"}))
-        
+                # Add a raw TCP probe so we can tell reachability apart from
+                # the device resetting the ZKTeco SDK handshake.
+                diag = self._probe_port()
+                self.controller.message_queue.put(('messagebox', 'showerror', {
+                    'title': 'Error',
+                    'message': f"Connection failed: {str(e)}\n\nDiagnostics:\n{diag}"
+                }))
+
         threading.Thread(target=check, daemon=True).start()
+
+    def _probe_port(self):
+        """Raw TCP probe of the device port to aid diagnosis."""
+        if not device_ip:
+            return "No device configured."
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(REQUEST_TIMEOUT)
+            result = s.connect_ex((device_ip, int(device_port)))
+            s.close()
+            if result == 0:
+                return (f"TCP port {device_port} is OPEN on {device_ip} — the PC "
+                        "reaches the device, but it reset the SDK connection.\n"
+                        "Likely: another program is already connected, or the "
+                        "device's SDK/ADMS setting is blocking it. Close other ZK "
+                        "software and reboot the terminal.")
+            return (f"TCP port {device_port} is NOT reachable on {device_ip} "
+                    f"(error {result}). Check IP, subnet, and firewall.")
+        except Exception as ex:
+            return f"Port probe failed: {ex}"
     
     def pull_data(self):
         def pull():
